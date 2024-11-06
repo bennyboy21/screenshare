@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://www.gstatic.com/firebasejs/7.21.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/7.21.0/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/7.21.0/firebase-database.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/7.21.0/firebase-storage.js"></script>
+    <link rel="stylesheet" href="style.css">
+    <title>Screen Share</title>
+</head>
+<body>
+    <h2>Live Streams</h2>
+    <button id="startShare">Start Screen Share</button>
+    <div id="streamList"></div>
+    <video id="screenVideo" autoplay playsinline controls></video>
+
+    <div id="namePrompt">
+        <label for="username">Enter your name: </label>
+        <input type="text" id="username" placeholder="Enter name" />
+        <button id="submitName">Submit</button>
+    </div>
+
+    <div id="liveSection">
+        <!-- This section will show the current live stream status -->
+        Currently no live stream.
+    </div>
+
+    <script>
+        // Firebase configuration (replace with your config)
+        const firebaseConfig = {
+            apiKey: "AIzaSyCQD712D3aH1Ku6yMdpJ8rdIZpI5YkF4g8",
+            authDomain: "mapbox-8554a.firebaseapp.com",
+            databaseURL: "https://mapbox-8554a-default-rtdb.firebaseio.com",
+            projectId: "mapbox-8554a",
+            storageBucket: "mapbox-8554a.appspot.com",
+            messagingSenderId: "1006740104953",
+            appId: "1:1006740104953:web:695a8148416f6f3b3a2428",
+            measurementId: "G-DTCXQE2S90"
+        };
+    
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+        const roomRef = database.ref('screenShareRooms');
+    
+        const streamListDiv = document.getElementById('streamList');
+        const videoElement = document.getElementById('screenVideo');
+        const namePromptDiv = document.getElementById('namePrompt');
+        const usernameInput = document.getElementById('username');
+        const submitNameButton = document.getElementById('submitName');
+        const startShareButton = document.getElementById('startShare');
+        const liveSection = document.getElementById('liveSection');
+    
+        let localStream;
+        let peerConnection;
+        const servers = {
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "turn:your.turn.server:3478", username: "username", credential: "password" }
+            ]
+        };
+    
+        // Check if user's name is already stored
+        const storedName = localStorage.getItem('username');
+        if (storedName) {
+            hideNamePrompt(storedName);
+        } else {
+            namePromptDiv.style.display = 'block';
+        }
+    
+        // Handle the name submission
+        submitNameButton.onclick = () => {
+            const username = usernameInput.value.trim();
+            if (username) {
+                localStorage.setItem('username', username);
+                hideNamePrompt(username);
+            } else {
+                alert('Please enter a name');
+            }
+        };
+    
+        // Hide the name prompt and proceed with the app
+        function hideNamePrompt(username) {
+            namePromptDiv.style.display = 'none';
+            console.log('Welcome, ' + username);
+        }
+    
+        // Start screen share button clicked
+        startShareButton.onclick = async () => {
+            await startScreenShare();
+        };
+    
+        // Start screen sharing process
+        async function startScreenShare() {
+            try {
+                peerConnection = new RTCPeerConnection(servers);
+    
+                localStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true
+                });
+    
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+    
+                const roomId = 'room_' + new Date().getTime();
+                const streamerName = localStorage.getItem('username') || 'Anonymous';
+    
+                roomRef.child(roomId).set({
+                    offer: JSON.stringify(offer),
+                    streamerName: streamerName,
+                    status: 'active'
+                });
+    
+                peerConnection.onicecandidate = event => {
+                    if (event.candidate) {
+                        roomRef.child(roomId).child('candidates').push(JSON.stringify(event.candidate));
+                    }
+                };
+    
+                roomRef.child(roomId).child('answer').on('value', async (snapshot) => {
+                    const answer = snapshot.val();
+                    if (answer) {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(answer)));
+                    }
+                });
+    
+                addStreamToViewerList(roomId, streamerName);
+    
+            } catch (error) {
+                console.error("Error starting screen share:", error);
+            }
+        }
+    
+        // Add the stream to the viewer's list of available streams with the streamer's name
+        function addStreamToViewerList(roomId, streamerName) {
+            const streamerNameFromLocalStorage = localStorage.getItem('username');
+            
+            // Don't show the streamer's own stream in the list
+            if (streamerName === streamerNameFromLocalStorage) {
+                return;
+            }
+
+            const streamButton = document.createElement('button');
+            streamButton.textContent = `Watch Stream from ${streamerName}`;
+            streamButton.onclick = () => viewStream(roomId);
+            const streamItem = document.createElement('div');
+            streamItem.appendChild(streamButton);
+            streamItem.id = `stream_${roomId}`; // Add an ID to the div for later reference
+            streamListDiv.appendChild(streamItem);
+        }
+
+        // Viewer clicks to watch a stream
+        async function viewStream(roomId) {
+            try {
+                const roomSnapshot = await roomRef.child(roomId).once('value');
+                const streamData = roomSnapshot.val();
+
+                if (!streamData) {
+                    console.error('Stream not found.');
+                    return;
+                }
+
+                if (streamData.status === 'disconnected') {
+                    console.log('Stream is disconnected.');
+                    stopStream();
+                    return;
+                }
+
+                const viewerPeerConnection = new RTCPeerConnection(servers);
+                viewerPeerConnection.ontrack = event => {
+                    videoElement.srcObject = event.streams[0];
+                };
+
+                const offer = streamData.offer;
+                if (offer) {
+                    await viewerPeerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(offer)));
+                    const answer = await viewerPeerConnection.createAnswer();
+                    await viewerPeerConnection.setLocalDescription(answer);
+                    roomRef.child(roomId).child('answer').set(JSON.stringify(answer));
+
+                    roomRef.child(roomId).child('candidates').on('child_added', async (snapshot) => {
+                        const candidate = new RTCIceCandidate(JSON.parse(snapshot.val()));
+                        await viewerPeerConnection.addIceCandidate(candidate);
+                    });
+                }
+            } catch (error) {
+                console.error("Error viewing stream:", error);
+            }
+        }
+    
+        // Stop the stream and clear the video element
+        function stopStream() {
+            // Stop all tracks on the local stream
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+
+            // Stop peer connection if it exists
+            if (peerConnection) {
+                peerConnection.close();
+            }
+
+            // Clear the video element's source
+            videoElement.srcObject = null;
+            videoElement.src = "";
+
+            alert("Live stream stopped"); // Notify the viewer
+            updateLiveSection(); // Update the current live section
+        }
+
+        // Monitor streams and update the stream list dynamically
+        roomRef.on('child_added', (snapshot) => {
+            const roomData = snapshot.val();
+            if (roomData.status === 'active') {
+                addStreamToViewerList(snapshot.key, roomData.streamerName);
+            }
+        });
+    
+        // Remove disconnected streams from the list
+        roomRef.on('child_changed', (snapshot) => {
+            const roomData = snapshot.val();
+            if (roomData.status === 'disconnected') {
+                const streamDiv = document.getElementById(`stream_${snapshot.key}`);
+                if (streamDiv) {
+                    streamDiv.remove(); // Remove the stream from the viewer list
+                }
+                stopStream(); // Stop the video and alert
+            }
+        });
+
+        // Update the live section when a stream is disconnected
+        function updateLiveSection() {
+            liveSection.innerHTML = 'Currently no live stream.';
+        }
+    </script>
+</body>
+</html>
